@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from talos_agent.payments.stellar_kit import format_stellar_amount
 from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
 
@@ -78,4 +79,4 @@ async def report_revenue(amount: float, source: str, tx_hash: str = "") -> dict:
     )
     if result:
         return result
-    return {"status": "reported", "amount": formatted_amount}
+    return {"status": "reported", "amount": format_stellar_amount(amount)}

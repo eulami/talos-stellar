@@ -81,8 +81,6 @@ export interface VerifyWebhookOptions {
   secret: string | string[];
   /** Allowed deviation in seconds between the current time and webhook timestamp. Default 300 (5 minutes). */
   toleranceSeconds?: number;
-  /** Replay-store retention in seconds; must cover the accepted timestamp window. */
-  replayWindowSeconds?: number;
   /**
    * How long (in seconds) a processed event ID is retained in the replay store.
    * Must be >= `toleranceSeconds` — if it were shorter, a dedup entry could

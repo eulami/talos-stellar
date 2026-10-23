@@ -42,6 +42,19 @@ import type {
   RotateWebhookSecretParams,
   RotateWebhookSecretResult,
   FinalizeWebhookSecretRotationResult,
+  ApiKey,
+  ApiKeyCreated,
+  CreateApiKeyParams,
+  RegenerateKeyParams,
+  ClaimJobParams,
+  HeartbeatJobParams,
+  ExtendJobLeaseParams,
+  ReleaseJobParams,
+  ReportJobProgressParams,
+  ClaimedJob,
+  HeartbeatResponse,
+  ReleaseJobResponse,
+  JobProgressResponse,
 } from "./types.js";
 
 import {
@@ -814,8 +827,23 @@ export class TalosClient {
       if (!Number.isInteger(maxEntries) || maxEntries < 1) {
         throw new RangeError("etagCache.maxEntries must be a positive integer");
       }
-      if (raw.store !== undefined && typeof raw.store !== "object") {
-        throw new TypeError("etagCache.store must be an object");
+      if (raw.store !== undefined) {
+        if (typeof raw.store !== "object" || raw.store === null) {
+          throw new TypeError("etagCache.store must be an object");
+        }
+        const store = raw.store as unknown as Record<string, unknown>;
+        if (
+          typeof store.get !== "function" ||
+          typeof store.set !== "function" ||
+          typeof store.delete !== "function"
+        ) {
+          throw new TypeError(
+            "etagCache.store must implement get(key), set(key, entry) and delete(key) functions",
+          );
+        }
+      }
+      if (raw.onCacheHit !== undefined && typeof raw.onCacheHit !== "function") {
+        throw new TypeError("etagCache.onCacheHit must be a function");
       }
       this.etagStore = raw.store ?? new BoundedETagStore(maxEntries);
       this.onCacheHit = raw.onCacheHit;
@@ -829,6 +857,15 @@ export class TalosClient {
    */
   getETagStore(): ETagStore | null {
     return this.etagStore;
+  }
+
+  /**
+   * Number of GET requests currently being deduplicated (shared in-flight
+   * promises tracked by the in-flight map). `0` when the feature is disabled
+   * or nothing is in flight.
+   */
+  getInFlightCount(): number {
+    return this.inFlightGets.size;
   }
 
   private etagCacheKey(method: string, url: string): string | null {
@@ -1279,10 +1316,6 @@ export class TalosClient {
    * synchronously so abort listeners attach before `abort()`.
    */
   private async request<T>(path: string, init?: RequestOptions): Promise<T> {
-    const { params, signal, idempotencyKey, timeoutMs: callTimeoutMs, ...requestInit } = init ?? {};
-    const callerSignal = signal ?? undefined;
-    const method = (requestInit.method ?? "GET").toUpperCase();
-    const url = this.buildUrl(path, params);
     if (!this.isModernEnvironment()) {
       throw new TalosAPIError(
         501,
@@ -1290,6 +1323,45 @@ export class TalosClient {
         path,
       );
     }
+
+    // ── In-flight GET deduplication ───────────────────────────
+    if (this.dedupeOptions) {
+      const { params } = init ?? {};
+      const method = (init?.method ?? "GET").toUpperCase();
+      const url = this.buildUrl(path, params);
+      const key = this.dedupeKey(method, url);
+      if (key !== null) {
+        const existing = this.inFlightGets.get(key);
+        if (existing) {
+          // Reuse the shared in-flight promise; the originator keeps making
+          // the actual network call.
+          this.dedupeOptions.onDedupe({ url, method });
+          return existing as Promise<T>;
+        }
+        const shared = this.executeRequest<T>(path, init);
+        this.inFlightGets.set(key, shared);
+        // Drop the entry the moment the shared promise settles so the next
+        // caller always issues a fresh request.
+        void shared.then(
+          () => {
+            this.inFlightGets.delete(key);
+          },
+          () => {
+            this.inFlightGets.delete(key);
+          },
+        );
+        return shared;
+      }
+    }
+
+    return this.executeRequest<T>(path, init);
+  }
+
+  private async executeRequest<T>(path: string, init?: RequestOptions): Promise<T> {
+    const { params, signal, idempotencyKey, timeoutMs: callTimeoutMs, ...requestInit } = init ?? {};
+    const callerSignal = signal ?? undefined;
+    const method = (requestInit.method ?? "GET").toUpperCase();
+    const url = this.buildUrl(path, params);
 
 
     const extraHeaders: Record<string, string> = {};
@@ -1470,6 +1542,69 @@ export class TalosClient {
 
   async createTalos(params: CreateTalosParams): Promise<TalosCreated> {
     return this.request("/api/talos", {
+      method: "POST",
+      body: JSON.stringify(params),
+    });
+  }
+
+  // ── API Key Management ─────────────────────────────────────────────────
+
+  /**
+   * List all scoped API keys for a Talos.
+   *
+   * Key material is never returned; only masked identifiers and metadata.
+   */
+  async listApiKeys(talosId: string): Promise<ApiKey[]> {
+    return this.request(`/api/talos/${talosId}/api-keys`);
+  }
+
+  /**
+   * Create a new scoped API key.
+   *
+   * The full key value is returned only once in `ApiKeyCreated.keyOnce`.
+   * It is never logged or included in any subsequent response.
+   *
+   * @example
+   * const created = await client.createApiKey("talos_abc", {
+   *   name: "CI deploy key",
+   *   scopes: ["activity:write", "revenue:read"],
+   * });
+   * // Store created.keyOnce securely — it will not be shown again.
+   */
+  async createApiKey(talosId: string, params: CreateApiKeyParams): Promise<ApiKeyCreated> {
+    return this.request(`/api/talos/${talosId}/api-keys`, {
+      method: "POST",
+      body: JSON.stringify(params),
+    });
+  }
+
+  /**
+   * Revoke a scoped API key by its ID.
+   *
+   * The key is immediately invalidated; any in-flight requests using it will
+   * receive a 401 response.
+   */
+  async revokeApiKey(talosId: string, keyId: string): Promise<void> {
+    await this.request(`/api/talos/${talosId}/api-keys/${keyId}`, {
+      method: "DELETE",
+    });
+  }
+
+  /**
+   * Regenerate the primary API key for a Talos.
+   *
+   * Requires a Stellar ED25519 signature proving wallet ownership so that only
+   * the operator can cycle the key. The old key is invalidated immediately.
+   *
+   * @example
+   * const { apiKey } = await client.regenerateKey("talos_abc", {
+   *   stellarPublicKey: "GABC…",
+   *   signature: base64Signature,
+   *   message: `Regenerate API key for talos_abc at ${Date.now()}`,
+   * });
+   */
+  async regenerateKey(talosId: string, params: RegenerateKeyParams): Promise<{ apiKey: string }> {
+    return this.request(`/api/talos/${talosId}/regenerate-key`, {
       method: "POST",
       body: JSON.stringify(params),
     });
@@ -2019,6 +2154,101 @@ export class TalosClient {
    */
   trackJob(jobId: string, options?: TrackJobOptions): JobTracker {
     return new JobTracker(this, jobId, options);
+  }
+
+  // ── Job lease lifecycle ──────────────────────────────────
+
+  /**
+   * Claim a job for processing. On success the caller receives a fencing token
+   * that must be supplied on subsequent heartbeat, extend, release, and
+   * progress calls.
+   *
+   * A 409 response (job already leased, not pending, or agent inactive) maps
+   * to a {@link TalosConflictError} with `code: "conflict_error"`.
+   */
+  async claimJob(
+    jobId: string,
+    params?: ClaimJobParams,
+    options?: WriteOptions,
+  ): Promise<ClaimedJob> {
+    return this.request(`/api/jobs/${jobId}/claim`, {
+      method: "POST",
+      body: JSON.stringify(params ?? {}),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * Send a heartbeat to renew an active job lease. Requires the fencing token
+   * returned from {@link claimJob}. A 409 response (lease not held, fencing
+   * token mismatch, or agent inactive) maps to a {@link TalosConflictError}.
+   */
+  async heartbeatJob(
+    jobId: string,
+    params: HeartbeatJobParams,
+    options?: WriteOptions,
+  ): Promise<HeartbeatResponse> {
+    return this.request(`/api/jobs/${jobId}/heartbeat`, {
+      method: "POST",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * Extend a job lease. This is a convenience alias for {@link heartbeatJob}
+   * that sends a heartbeat to renew the lease. A 409 response maps to a
+   * {@link TalosConflictError}.
+   */
+  async extendJobLease(
+    jobId: string,
+    params: ExtendJobLeaseParams,
+    options?: WriteOptions,
+  ): Promise<HeartbeatResponse> {
+    return this.heartbeatJob(jobId, { fencingToken: params.fencingToken }, options);
+  }
+
+  /**
+   * Release a job lease back to the pending pool. Requires the fencing token
+   * returned from {@link claimJob}. A 409 response (lease not held or fencing
+   * token mismatch) maps to a {@link TalosConflictError}.
+   */
+  async releaseJob(
+    jobId: string,
+    params: ReleaseJobParams,
+    options?: WriteOptions,
+  ): Promise<ReleaseJobResponse> {
+    return this.request(`/api/jobs/${jobId}/release`, {
+      method: "POST",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * Report mid-job progress (percent, stage, message) for a leased job.
+   * Optionally supply the fencing token for optimistic concurrency. A 409
+   * response (job completed, leased by another worker, or fencing token
+   * mismatch) maps to a {@link TalosConflictError}.
+   */
+  async reportJobProgress(
+    jobId: string,
+    params: ReportJobProgressParams,
+    options?: WriteOptions,
+  ): Promise<JobProgressResponse> {
+    return this.request(`/api/jobs/${jobId}/progress`, {
+      method: "POST",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
   }
 
   // ── Leaderboard ────────────────────────────────────────────

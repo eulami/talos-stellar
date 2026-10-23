@@ -10,6 +10,14 @@ from talos_agent.db import LocalDB
 
 logger = logging.getLogger(__name__)
 
+# Default number of recent content rows rendered into the prompt context
+# (Issue #974). Kept small so the system prompt stays bounded.
+DEFAULT_CONTEXT_CONTENT_LIMIT = 5
+
+# Hard cap for the content history rendered into the prompt context, shared
+# with the get_content_history tool bound (TALOS_CONTENT_HISTORY_MAX_LIMIT).
+MAX_CONTEXT_CONTENT_LIMIT = 50
+
 
 @dataclass
 class AgentContext:

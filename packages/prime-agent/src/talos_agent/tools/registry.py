@@ -324,7 +324,7 @@ class Tool:
     timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
-        self.timeout = validate_tool_timeout(self.timeout)
+        self.timeout = _validate_tool_timeout(self.timeout)
 
     def to_openai_schema(self) -> dict:
         return {
@@ -394,7 +394,7 @@ class ToolRegistry:
     ) -> None:
         # Raises ManifestValidationError for a declared-but-unenforceable
         # manifest, so the problem surfaces at import rather than first call.
-        timeout = validate_tool_timeout(timeout)
+        timeout = _validate_tool_timeout(timeout)
         self._enforcer.register(name, permissions)
 
         # Fallback to function signature schema if empty parameters provided
@@ -600,7 +600,7 @@ class ToolRegistry:
         except asyncio.CancelledError:
             outcome = "cancelled"
             raise
-        except ToolTimeoutError:
+        except _ToolTimeoutError:
             outcome = "timeout"
             raise
         except Exception as e:
@@ -660,7 +660,6 @@ def _resolve_json_type(hint: Any) -> dict[str, Any]:
     - ``dict[K, V]`` → ``{"type": "object"}``
     - Anything unrecognised → ``{"type": "string"}``
     """
-    import types as _types
     import typing as _typing
 
     origin = _typing.get_origin(hint)

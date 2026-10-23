@@ -33,10 +33,14 @@ const source = readFileSync(BUNDLE_PATH, "utf8");
 const windowLike = {};
 windowLike.crypto = crypto;
 windowLike.globalThis = windowLike;
-const globalThisLike = windowLike;
-windowLike.window = windowLike;
-windowLike.self = windowLike;
-windowLike.globalThis = globalThisLike;
+// The Stellar SDK resolves Web APIs via `globalThis.X` (e.g. the UTF-8
+// decoders in its base-x/XDR helpers). The own `globalThis` property above
+// shadows the vm sandbox global, so these constructors must be mirrored onto
+// the emulated window or they resolve to `undefined`.
+windowLike.TextDecoder = TextDecoder;
+windowLike.TextEncoder = TextEncoder;
+windowLike.btoa = btoa;
+windowLike.atob = atob;
 const context = {
   // Mimic a browser's globals. We deliberately do NOT expose Buffer, require,
   // __dirname, etc. — this catches accidental Node-only usage in the SDK's
@@ -45,7 +49,7 @@ const context = {
   // scripts/bundle-browser.mjs) and must NOT be provided here.
   window: windowLike,
   self: windowLike,
-  globalThis: globalThisLike,
+  globalThis: windowLike,
   TextEncoder,
   TextDecoder,
   btoa,

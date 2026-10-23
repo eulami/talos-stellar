@@ -12,7 +12,6 @@ from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from talos_agent.circuit_breaker import CircuitBreakerConfig
-from talos_agent.http import validate_tool_timeout
 
 APP_DIR = Path.home() / ".talos-agent"
 

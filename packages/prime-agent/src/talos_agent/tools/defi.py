@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from talos_agent.payments.stellar_kit import format_stellar_amount, to_stellar_amount
 from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
 
@@ -151,6 +152,7 @@ async def repay_loan(loan_id: int, amount: float | str | None = None) -> dict:
         return {"error": f"Repayment amount {amount_dec} exceeds outstanding {outstanding_dec}"}
     
     formatted_amount = format_stellar_amount(amount_dec)
+    formatted_remaining = format_stellar_amount(outstanding_dec - amount_dec)
     amount_float = float(formatted_amount)
 
     # Check approval threshold for repayment

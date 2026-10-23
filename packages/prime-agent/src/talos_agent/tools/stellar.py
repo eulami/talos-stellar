@@ -9,7 +9,10 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from talos_agent.payments.stellar_kit import StellarKit
+from talos_agent.payments.stellar_kit import (
+    StellarKit,
+    format_stellar_amount,
+)
 from talos_agent.payments.stellar_retry import (
     attach_stellar_failure,
     classify_stellar_failure,
@@ -48,6 +51,7 @@ async def transfer_xlm(to_account: str, amount: float | str, reason: str = "") -
     # Check threshold
     threshold = float(_deps().settings.approval_threshold)
     if amount > threshold:
+        formatted_amount = format_stellar_amount(amount)
         result = await _deps().api.create_approval(
             _deps().settings.talos_id,
             type_="transaction",
@@ -62,7 +66,7 @@ async def transfer_xlm(to_account: str, amount: float | str, reason: str = "") -
             "to": to_account,
         }
 
-    return await kit.transfer_xlm(to_account, formatted_amount)
+    return await kit.transfer_xlm(to_account, format_stellar_amount(amount))
 
 
 @tool("get_xlm_balance", "Check XLM balance for the Talos account via Horizon")
